@@ -1,0 +1,26 @@
+name: Native PNG regressions
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.3'
+          channel: stable
+      - run: flutter pub get
+      - run: cmake -S src -B build/native -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build/native
+      - run: flutter analyze --no-pub lib/lodepng_flutter.dart test/png_buffer_test.dart
+      - run: flutter test --no-pub test/png_buffer_test.dart
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build/native

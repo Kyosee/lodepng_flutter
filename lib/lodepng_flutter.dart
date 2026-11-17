@@ -13,7 +13,9 @@ final DynamicLibrary _dylib = () {
   if (Platform.isMacOS || Platform.isIOS) {
     return DynamicLibrary.open('$_libName.framework/$_libName');
   }
-  if (Platform.isAndroid || Platform.isLinux) {
+  if (Platform.isAndroid ||
+      Platform.isLinux ||
+      Platform.operatingSystem == 'ohos') {
     return DynamicLibrary.open('lib$_libName.so');
   }
   if (Platform.isWindows) {
@@ -39,41 +41,56 @@ class Image {
 
 /// Decodes a PNG image from [data].
 Image decodePng(Uint8List data) {
-  final buffer = decodePngToPointer(data);
-  final data1 = Pointer<Uint8>
-      .fromAddress(buffer.address)
-      .asTypedList(buffer.length);
-  final image = Image(data1, buffer.length ~/ 4, buffer.length ~/ 4);
-  _bindings.freePtr(Pointer.fromAddress(buffer.address));
-  return image;
+  final (buffer, width, height) = _decodePng(data);
+  try {
+    final pixels =
+        Pointer<Uint8>.fromAddress(buffer.address).asTypedList(buffer.length);
+    return Image(Uint8List.fromList(pixels), width, height);
+  } finally {
+    _bindings.freePtr(Pointer.fromAddress(buffer.address));
+  }
 }
 
-ByteBuffer decodePngToPointer(Uint8List data) {
-  Pointer<Pointer<UnsignedChar>> out = malloc.allocate(sizeOf<Pointer>());
-  Pointer<UnsignedInt> w = malloc.allocate(sizeOf<UnsignedInt>());
-  Pointer<UnsignedInt> h = malloc.allocate(sizeOf<UnsignedInt>());
-  final insize = data.length;
-  final in1 = malloc.allocate<Uint8>(insize);
-  in1.asTypedList(insize).setAll(0, data);
-  _bindings.lodepng_decode32(out, w, h, in1.cast(), insize);
-  final width = w.value;
-  final height = h.value;
-  malloc.free(w);
-  malloc.free(h);
-  malloc.free(in1);
-  final out1 = out.value;
-  malloc.free(out);
-  return ByteBuffer(out1.address, width * height * 4);
+/// The caller owns the returned native buffer; release it with [ByteBuffer.finalizer].
+ByteBuffer decodePngToPointer(Uint8List data) => _decodePng(data).$1;
+
+(ByteBuffer, int, int) _decodePng(Uint8List data) {
+  if (data.isEmpty) throw const FormatException('Empty PNG data');
+  final out = calloc<Pointer<UnsignedChar>>();
+  final w = calloc<UnsignedInt>();
+  final h = calloc<UnsignedInt>();
+  final input = malloc<Uint8>(data.length);
+  try {
+    input.asTypedList(data.length).setAll(0, data);
+    final error =
+        _bindings.lodepng_decode32(out, w, h, input.cast(), data.length);
+    if (error != 0) {
+      _bindings.freePtr(out.value.cast());
+      throw FormatException('PNG decode failed ($error)');
+    }
+    return (
+      ByteBuffer(out.value.address, w.value * h.value * 4),
+      w.value,
+      h.value
+    );
+  } finally {
+    calloc.free(out);
+    calloc.free(w);
+    calloc.free(h);
+    malloc.free(input);
+  }
 }
 
 /// Encodes [image] to a PNG image.
 Uint8List encodePng(Image image) {
   final buffer = encodePngToPointer(image);
-  final data = Pointer<Uint8>
-      .fromAddress(buffer.address)
-      .asTypedList(buffer.length);
-  _bindings.freePtr(Pointer.fromAddress(buffer.address));
-  return data;
+  try {
+    final data =
+        Pointer<Uint8>.fromAddress(buffer.address).asTypedList(buffer.length);
+    return Uint8List.fromList(data);
+  } finally {
+    _bindings.freePtr(Pointer.fromAddress(buffer.address));
+  }
 }
 
 class ByteBuffer {
@@ -83,26 +100,40 @@ class ByteBuffer {
 
   ByteBuffer(this.address, this.length);
 
-  static Pointer<NativeFinalizerFunction> get finalizer => _dylib.lookup('freePtr');
+  static Pointer<NativeFinalizerFunction> get finalizer =>
+      _dylib.lookup('freePtr');
 }
 
 ByteBuffer encodePngToPointer(Image image) {
-  Pointer<Pointer<UnsignedChar>> out = malloc.allocate(sizeOf<Pointer>());
-  Pointer<Size> outsize = malloc.allocate(sizeOf<Size>());
-  final insize = image.data.length;
-  final in1 = malloc.allocate<Uint8>(insize);
-  in1.asTypedList(insize).setAll(0, image.data);
-  _bindings.lodepng_encode32(
-    out,
-    outsize,
-    in1.cast(),
-    image.width,
-    image.height,
-  );
-  final size = outsize.value;
-  final out1 = out.value;
-  malloc.free(out);
-  malloc.free(outsize);
-  malloc.free(in1);
-  return ByteBuffer(out1.address, size);
+  // Validate before native unsigned conversion and multiplication.
+  if (image.width <= 0 ||
+      image.width > 0xffffffff ||
+      image.height <= 0 ||
+      image.height > 0xffffffff ||
+      image.width > image.data.length ~/ 4 ~/ image.height) {
+    throw ArgumentError(
+        'Image requires positive dimensions and complete RGBA data');
+  }
+  final out = calloc<Pointer<UnsignedChar>>();
+  final outsize = calloc<Size>();
+  final input = malloc<Uint8>(image.data.length);
+  try {
+    input.asTypedList(image.data.length).setAll(0, image.data);
+    final error = _bindings.lodepng_encode32(
+      out,
+      outsize,
+      input.cast(),
+      image.width,
+      image.height,
+    );
+    if (error != 0) {
+      _bindings.freePtr(out.value.cast());
+      throw StateError('PNG encode failed ($error)');
+    }
+    return ByteBuffer(out.value.address, outsize.value);
+  } finally {
+    calloc.free(out);
+    calloc.free(outsize);
+    malloc.free(input);
+  }
 }
